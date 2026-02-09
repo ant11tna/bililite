@@ -1,8 +1,27 @@
+async function loadGroups() {
+  const select = document.getElementById("group");
+  try {
+    const res = await fetch("/api/creator-groups");
+    if (!res.ok) return;
+    const groups = await res.json();
+    for (const g of groups) {
+      const opt = document.createElement("option");
+      opt.value = g;
+      opt.textContent = g;
+      select.appendChild(opt);
+    }
+  } catch {
+    // ignore load errors
+  }
+}
+
 async function load() {
   const q = document.getElementById("q").value.trim();
   const tag = document.getElementById("tag").value.trim();
   const viewMin = document.getElementById("viewMin").value.trim();
   const viewMax = document.getElementById("viewMax").value.trim();
+  const group = document.getElementById("group").value;
+  const onlyWhitelist = document.getElementById("onlyWhitelist").checked;
   const sort = document.getElementById("sort").value;
 
   const params = new URLSearchParams();
@@ -10,10 +29,12 @@ async function load() {
   if (tag) params.set("tag", tag);
   if (viewMin) params.set("view_min", viewMin);
   if (viewMax) params.set("view_max", viewMax);
+  if (group) params.set("group", group);
+  if (!onlyWhitelist) params.set("only_whitelist", "false");
   params.set("sort", sort);
   params.set("limit", "50");
 
-  const res = await fetch(`http://127.0.0.1:9000/api/videos?${params.toString()}`);
+  const res = await fetch(`/api/videos?${params.toString()}`);
   const data = await res.json();
 
   const list = document.getElementById("list");
@@ -58,4 +79,5 @@ function formatAuthor(v) {
 }
 
 document.getElementById("btn").addEventListener("click", load);
+loadGroups();
 load();

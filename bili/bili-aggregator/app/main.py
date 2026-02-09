@@ -26,8 +26,10 @@ def list_videos(
     uid: Optional[int] = None,
     tid: Optional[int] = None,
     tag: Optional[str] = None,
+    group: Optional[str] = None,
     view_min: Optional[int] = None,
     view_max: Optional[int] = None,
+    only_whitelist: bool = True,
     sort: str = Query("pub", pattern="^(pub|view)$"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
@@ -57,6 +59,11 @@ def list_videos(
     if tag:
         where.append("EXISTS (SELECT 1 FROM video_tags vt WHERE vt.bvid=v.bvid AND vt.tag=?)")
         params.append(tag)
+    if only_whitelist:
+        where.append("c.enabled=1")
+    if group:
+        where.append("c.group_name=?")
+        params.append(group)
 
     where_sql = ("WHERE " + " AND ".join(where)) if where else ""
     order_sql = "ORDER BY v.pub_ts DESC" if sort == "pub" else "ORDER BY COALESCE(v.view,0) DESC, v.pub_ts DESC"
@@ -64,6 +71,7 @@ def list_videos(
     sql = f"""
       SELECT v.bvid, v.uid, v.author_name, v.title, v.pub_ts, v.url, v.cover_url, v.tname, v.view
       FROM videos v
+      LEFT JOIN creators c ON c.uid = v.uid
       {where_sql}
       {order_sql}
       LIMIT ? OFFSET ?
@@ -88,3 +96,20 @@ def list_videos(
 
     conn.close()
     return out
+
+@app.get("/api/creator-groups", response_model=List[str])
+def list_creator_groups():
+    cfg = load_config()
+    conn = connect(cfg["app"]["db_path"])
+    init_db(conn)
+    rows = conn.execute(
+        """
+        SELECT DISTINCT group_name
+        FROM creators
+        WHERE group_name IS NOT NULL AND group_name != ''
+        ORDER BY group_name
+        """
+    ).fetchall()
+    groups = [r["group_name"] for r in rows]
+    conn.close()
+    return groups

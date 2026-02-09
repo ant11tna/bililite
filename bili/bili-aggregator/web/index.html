@@ -16,6 +16,13 @@
       <input id="tag" placeholder="tag（精确匹配）" />
       <input id="viewMin" placeholder="播放量>=（可空）" />
       <input id="viewMax" placeholder="播放量<=（可空）" />
+      <select id="group">
+        <option value="">全部分组</option>
+      </select>
+      <label class="toggle">
+        <input id="onlyWhitelist" type="checkbox" checked />
+        <span>仅白名单</span>
+      </label>
       <select id="sort">
         <option value="pub">按最新</option>
         <option value="view">按播放量</option>
