@@ -1,5 +1,7 @@
 from fastapi import FastAPI, Query
 from typing import List, Optional
+import random
+import time
 import yaml
 
 from .db import connect, init_db
@@ -113,3 +115,61 @@ def list_creator_groups():
     groups = [r["group_name"] for r in rows]
     conn.close()
     return groups
+
+@app.get("/api/daily", response_model=List[VideoOut])
+def list_daily(
+    group: Optional[str] = "必看",
+    hours: int = Query(24, ge=1, le=168),
+    limit: int = Query(50, ge=1, le=200),
+    sample: int = Query(5, ge=0, le=200),
+):
+    cfg = load_config()
+    conn = connect(cfg["app"]["db_path"])
+    init_db(conn)
+
+    if group:
+        row = conn.execute(
+            "SELECT 1 FROM creators WHERE enabled=1 AND group_name=? LIMIT 1",
+            (group,),
+        ).fetchone()
+        if not row:
+            group = None
+
+    cutoff = int(time.time()) - hours * 3600
+    where = ["c.enabled=1", "v.pub_ts >= ?"]
+    params = [cutoff]
+    if group:
+        where.append("c.group_name=?")
+        params.append(group)
+
+    where_sql = "WHERE " + " AND ".join(where)
+    sql = f"""
+      SELECT v.bvid, v.uid, v.author_name, v.title, v.pub_ts, v.url, v.cover_url, v.tname, v.view
+      FROM videos v
+      LEFT JOIN creators c ON c.uid = v.uid
+      {where_sql}
+      ORDER BY v.pub_ts DESC
+      LIMIT ?
+    """
+    rows = conn.execute(sql, (*params, limit)).fetchall()
+
+    out: List[VideoOut] = []
+    for r in rows:
+        tags = conn.execute("SELECT tag FROM video_tags WHERE bvid=? ORDER BY tag", (r["bvid"],)).fetchall()
+        out.append(VideoOut(
+            bvid=r["bvid"],
+            uid=r["uid"],
+            author_name=r["author_name"],
+            title=r["title"],
+            pub_ts=r["pub_ts"],
+            url=r["url"],
+            cover_url=r["cover_url"],
+            tname=r["tname"],
+            view=r["view"],
+            tags=[t["tag"] for t in tags],
+        ))
+
+    conn.close()
+    if sample > 0 and len(out) > sample:
+        return random.sample(out, sample)
+    return out
