@@ -50,6 +50,12 @@ CREATE TABLE IF NOT EXISTS video_tags (
 );
 
 CREATE INDEX IF NOT EXISTS idx_video_tags_tag ON video_tags(tag);
+
+CREATE TABLE IF NOT EXISTS push_log (
+  bvid TEXT PRIMARY KEY,
+  channel TEXT NOT NULL,
+  pushed_ts INTEGER NOT NULL
+);
 """
 
 def connect(db_path: str) -> sqlite3.Connection:
