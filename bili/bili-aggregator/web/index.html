@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Bili Aggregator</title>
+  <link rel="stylesheet" href="/static/styles.css">
+
+</head>
+<body>
+  <div class="wrap">
+    <h1>Bili Aggregator</h1>
+
+    <div class="bar">
+      <input id="q" placeholder="标题关键词" />
+      <input id="tag" placeholder="tag（精确匹配）" />
+      <input id="viewMin" placeholder="播放量>=（可空）" />
+      <input id="viewMax" placeholder="播放量<=（可空）" />
+      <select id="sort">
+        <option value="pub">按最新</option>
+        <option value="view">按播放量</option>
+      </select>
+      <button id="btn">刷新</button>
+    </div>
+
+    <div id="list" class="list"></div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
