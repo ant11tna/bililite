@@ -2,8 +2,7 @@ from fastapi import FastAPI, Query
 from typing import List, Optional
 import random
 import time
-import yaml
-
+from .config import load_config
 from .db import connect, init_db
 from .schemas import VideoOut, VideoState, VideoStateOut, VideoStateUpdateIn
 
@@ -17,11 +16,6 @@ app.mount("/static", StaticFiles(directory="web"), name="static")
 @app.get("/")
 def home():
     return FileResponse("web/index.html")
-
-
-def load_config() -> dict:
-    with open("config.yaml", "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
 
 
 @app.get("/api/videos", response_model=List[VideoOut])
