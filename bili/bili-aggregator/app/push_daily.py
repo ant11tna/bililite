@@ -1,4 +1,5 @@
-from .push import load_config, send_daily_push
+from .config import load_config
+from .push import send_daily_push
 
 
 def main() -> int:

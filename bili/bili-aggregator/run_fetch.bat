@@ -1,3 +1,3 @@
 @echo off
 cd /d %~dp0
-.\.venv\Scripts\python.exe -c "import yaml; from app.fetcher import run_fetch; cfg=yaml.safe_load(open('config.yaml','r',encoding='utf-8')); print(run_fetch(cfg))"
+.\.venv\Scripts\python.exe -c "from app.config import load_config; from app.fetcher import run_fetch; print(run_fetch(load_config()))"

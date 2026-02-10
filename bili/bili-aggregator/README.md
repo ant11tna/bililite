@@ -1,5 +1,44 @@
 # Bililite (bili-aggregator)
 
+## 配置文件与本地私密覆盖
+
+项目支持两层配置：
+
+- `config.yaml`：基础配置，**可以提交到仓库**。
+- `config.local.yaml`：本地私密覆盖配置，**仅本机使用，不提交**（已通过 `.gitignore` 忽略）。
+
+读取配置时会按下面顺序加载并深度合并：
+
+1. 先读取 `config.yaml`
+2. 再读取 `config.local.yaml`
+3. 执行深度合并（dict 递归合并；list 直接覆盖；标量直接覆盖）
+
+统一入口：`app/config.py` 中的 `load_config()`。
+
+### 推荐做法
+
+在 `config.yaml` 中保留可公开字段，敏感字段留空。例如：
+
+```yaml
+push:
+  enabled: true
+  provider: "serverchan"
+  serverchan:
+    sendkey: ""
+```
+
+然后只在本地新建 `config.local.yaml`（不要提交）：
+
+```yaml
+push:
+  serverchan:
+    sendkey: "你的真实 SENDKEY"
+bilibili:
+  cookie: "你的真实 Cookie"
+```
+
+这样在运行 `python -m app.push_daily` 时，会自动读取本地覆盖后的 `sendkey` 并执行推送。
+
 ## 离线安装（无需联网）
 
 > 依赖 wheel 由你在本机生成并放入 `vendor/wheels/`。
@@ -41,13 +80,21 @@ push:
   enabled: true
   provider: "serverchan"
   serverchan:
-    sendkey: "你的 SENDKEY"
+    sendkey: ""
   daily:
     group: "必看"
     hours: 24
     limit: 50
     sample: 5
     max_items: 5
+```
+
+并在本地 `config.local.yaml` 填写真实 `sendkey`：
+
+```yaml
+push:
+  serverchan:
+    sendkey: "你的 SENDKEY"
 ```
 
 > 若 `group` 为空或不存在，会自动退化为所有 `enabled` creators。
