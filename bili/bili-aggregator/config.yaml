@@ -24,20 +24,20 @@ bilibili:
   timeout_sec: 15
   cookie: "SESSDATA=7fa70c82%2C1785507116%2C113f9%2A22CjDXFnrJPrVq9mvsK4IchnrXNhBtonNiy5-VN0e0EOo-agOXDudIPIzyPvNjp-gS6fISVjVjeDd3MmRiTG5XYjdfdmRjZlBOeTQ0Vk1ScHBrRHh3YlZ1MVJiamRWaHVYbUZoX09Lb1ctNUtZd1U3cXRuSEZyTW1nMlZtdjBieVhrc25wZGJZNmNnIIEC; bili_jct=cb8315d4ae8e6c0d70a99653905a3ab0; DedeUserID=382373353"
 
-
-
 rsshub:
-  base_url: "http://127.0.0.1:1200"  # 如果你本机/局域网跑了 RSSHub
-  # 这里写“uid -> RSS route”的拼接规则（按你实际的 RSSHub 路由改）
-  # 例："/bilibili/user/video/{uid}" 之类（仅示意，未经验证）
+  base_url: "http://127.0.0.1:1200"
   route_template: "/bilibili/user/video/{uid}"
 
 creators:
   - uid: 123456
     name: "UP1"
-    group: "默认"
+    group: "必看"
     enabled: true
+    priority: 1
+    weight: 200
   - uid: 234567
     name: "UP2"
-    group: "分组B"
+    group: "必看"
     enabled: true
+    priority: 0
+    weight: 100
