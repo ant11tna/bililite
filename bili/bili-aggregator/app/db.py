@@ -9,6 +9,8 @@ CREATE TABLE IF NOT EXISTS creators (
   uid INTEGER PRIMARY KEY,
   name TEXT,
   group_name TEXT,
+  priority INTEGER NOT NULL DEFAULT 0,
+  weight INTEGER NOT NULL DEFAULT 100,
   enabled INTEGER NOT NULL DEFAULT 1,
   last_fetch_at TEXT
 );
@@ -75,4 +77,15 @@ def connect(db_path: str) -> sqlite3.Connection:
 
 def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(DDL)
+    creator_columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(creators)").fetchall()
+    }
+    if "priority" not in creator_columns:
+        conn.execute(
+            "ALTER TABLE creators ADD COLUMN priority INTEGER NOT NULL DEFAULT 0"
+        )
+    if "weight" not in creator_columns:
+        conn.execute(
+            "ALTER TABLE creators ADD COLUMN weight INTEGER NOT NULL DEFAULT 100"
+        )
     conn.commit()

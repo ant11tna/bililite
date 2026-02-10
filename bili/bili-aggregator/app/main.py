@@ -1,11 +1,11 @@
 from fastapi import FastAPI, Query
-from typing import List, Optional
+from typing import List, Optional, Sequence
 import random
 import time
 import yaml
 
 from .db import connect, init_db
-from .schemas import VideoOut, VideoState, VideoStateOut, VideoStateUpdateIn
+from .schemas import CreatorOut, VideoOut, VideoState, VideoStateOut, VideoStateUpdateIn
 
 app = FastAPI()
 from fastapi.staticfiles import StaticFiles
@@ -22,6 +22,42 @@ def home():
 def load_config() -> dict:
     with open("config.yaml", "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
+
+
+def row_to_video(conn, row) -> VideoOut:
+    tags = conn.execute("SELECT tag FROM video_tags WHERE bvid=? ORDER BY tag", (row["bvid"],)).fetchall()
+    return VideoOut(
+        bvid=row["bvid"],
+        uid=row["uid"],
+        author_name=row["author_name"],
+        title=row["title"],
+        pub_ts=row["pub_ts"],
+        duration_sec=row["duration_sec"],
+        state=row["state"],
+        url=row["url"],
+        cover_url=row["cover_url"],
+        tname=row["tname"],
+        view=row["view"],
+        tags=[t["tag"] for t in tags],
+    )
+
+
+def weighted_sample_without_replacement(rows: Sequence, k: int):
+    pool = list(rows)
+    picked = []
+    n = min(k, len(pool))
+    for _ in range(n):
+        total_weight = sum(max(1, int(r["weight"] or 1)) for r in pool)
+        ticket = random.uniform(0, total_weight)
+        cumsum = 0.0
+        index = 0
+        for i, row in enumerate(pool):
+            cumsum += max(1, int(row["weight"] or 1))
+            if ticket <= cumsum:
+                index = i
+                break
+        picked.append(pool.pop(index))
+    return picked
 
 
 @app.get("/api/videos", response_model=List[VideoOut])
@@ -91,26 +127,7 @@ def list_videos(
     """
     rows = conn.execute(sql, (*params, limit, offset)).fetchall()
 
-    out: List[VideoOut] = []
-    for r in rows:
-        tags = conn.execute("SELECT tag FROM video_tags WHERE bvid=? ORDER BY tag", (r["bvid"],)).fetchall()
-        out.append(
-            VideoOut(
-                bvid=r["bvid"],
-                uid=r["uid"],
-                author_name=r["author_name"],
-                title=r["title"],
-                pub_ts=r["pub_ts"],
-                duration_sec=r["duration_sec"],
-                state=r["state"],
-                url=r["url"],
-                cover_url=r["cover_url"],
-                tname=r["tname"],
-                view=r["view"],
-                tags=[t["tag"] for t in tags],
-            )
-        )
-
+    out = [row_to_video(conn, r) for r in rows]
     conn.close()
     return out
 
@@ -190,6 +207,34 @@ def list_creator_groups():
     return groups
 
 
+@app.get("/api/creators", response_model=List[CreatorOut])
+def list_creators():
+    cfg = load_config()
+    conn = connect(cfg["app"]["db_path"])
+    init_db(conn)
+    rows = conn.execute(
+        """
+        SELECT uid, name, group_name, priority, weight, last_fetch_at
+        FROM creators
+        WHERE enabled=1
+        ORDER BY priority DESC, uid ASC
+        """
+    ).fetchall()
+    out = [
+        CreatorOut(
+            uid=r["uid"],
+            name=r["name"],
+            group=r["group_name"],
+            priority=int(r["priority"] or 0),
+            weight=max(1, int(r["weight"] or 1)),
+            last_fetch_at=r["last_fetch_at"],
+        )
+        for r in rows
+    ]
+    conn.close()
+    return out
+
+
 @app.get("/api/daily", response_model=List[VideoOut])
 def list_daily(
     group: Optional[str] = "必看",
@@ -201,55 +246,85 @@ def list_daily(
     conn = connect(cfg["app"]["db_path"])
     init_db(conn)
 
+    requested_group = group
+    group_hit = False
     if group:
-        row = conn.execute(
-            "SELECT 1 FROM creators WHERE enabled=1 AND group_name=? LIMIT 1",
-            (group,),
-        ).fetchone()
-        if not row:
+        row = conn.execute("SELECT 1 FROM creators WHERE enabled=1 AND group_name=? LIMIT 1", (group,)).fetchone()
+        group_hit = bool(row)
+        if not group_hit:
             group = None
 
     cutoff = int(time.time()) - hours * 3600
-    where = ["c.enabled=1", "v.pub_ts >= ?", "COALESCE(s.state, 'NEW') != 'HIDDEN'"]
-    params = [cutoff]
+    base_where = [
+        "c.enabled=1",
+        "v.pub_ts >= ?",
+        "COALESCE(s.state, 'NEW') != 'HIDDEN'",
+        "NOT EXISTS (SELECT 1 FROM push_log p WHERE p.bvid=v.bvid)",
+    ]
+    base_params = [cutoff]
     if group:
-        where.append("c.group_name=?")
-        params.append(group)
+        base_where.append("c.group_name=?")
+        base_params.append(group)
 
-    where_sql = "WHERE " + " AND ".join(where)
-    sql = f"""
+    where_sql = "WHERE " + " AND ".join(base_where)
+    base_sql = f"""
       SELECT v.bvid, v.uid, v.author_name, v.title, v.pub_ts, v.duration_sec, v.url, v.cover_url, v.tname, v.view,
-             COALESCE(s.state, 'NEW') AS state
+             COALESCE(s.state, 'NEW') AS state,
+             c.priority AS priority,
+             c.weight AS weight
       FROM videos v
       LEFT JOIN creators c ON c.uid = v.uid
       LEFT JOIN video_state s ON s.bvid = v.bvid
       {where_sql}
       ORDER BY v.pub_ts DESC
-      LIMIT ?
     """
-    rows = conn.execute(sql, (*params, limit)).fetchall()
 
-    out: List[VideoOut] = []
-    for r in rows:
-        tags = conn.execute("SELECT tag FROM video_tags WHERE bvid=? ORDER BY tag", (r["bvid"],)).fetchall()
-        out.append(
-            VideoOut(
-                bvid=r["bvid"],
-                uid=r["uid"],
-                author_name=r["author_name"],
-                title=r["title"],
-                pub_ts=r["pub_ts"],
-                duration_sec=r["duration_sec"],
-                state=r["state"],
-                url=r["url"],
-                cover_url=r["cover_url"],
-                tname=r["tname"],
-                view=r["view"],
-                tags=[t["tag"] for t in tags],
-            )
-        )
+    max_items = limit
+    dedupe_rows = conn.execute(base_sql, tuple(base_params)).fetchall()
+
+    dropped_by_dedupe = conn.execute(
+        """
+        SELECT COUNT(1) AS cnt
+        FROM videos v
+        LEFT JOIN creators c ON c.uid = v.uid
+        LEFT JOIN video_state s ON s.bvid = v.bvid
+        WHERE c.enabled=1
+          AND v.pub_ts >= ?
+          AND COALESCE(s.state, 'NEW') != 'HIDDEN'
+          AND EXISTS (SELECT 1 FROM push_log p WHERE p.bvid=v.bvid)
+          AND (? IS NULL OR c.group_name=?)
+        """,
+        (cutoff, group, group),
+    ).fetchone()["cnt"]
+
+    if group_hit:
+        p1 = [r for r in dedupe_rows if int(r["priority"] or 0) == 1]
+        p0 = [r for r in dedupe_rows if int(r["priority"] or 0) != 1]
+        selected_rows = p1[:max_items]
+        if len(selected_rows) < max_items:
+            selected_rows.extend(p0[: max_items - len(selected_rows)])
+    else:
+        p1 = [r for r in dedupe_rows if int(r["priority"] or 0) == 1]
+        p0 = [r for r in dedupe_rows if int(r["priority"] or 0) != 1]
+        selected_rows = dedupe_rows[:max_items]
+
+    used_sampling = sample > 0 and len(selected_rows) > sample
+    if used_sampling:
+        selected_rows = weighted_sample_without_replacement(selected_rows, sample)
+
+    out = [row_to_video(conn, r) for r in selected_rows]
+
+    print(
+        "[daily]"
+        f" requested_group={requested_group!r}"
+        f" group_hit={group_hit}"
+        f" candidates={len(dedupe_rows)}"
+        f" priority1={len(p1)}"
+        f" priority0={len(p0)}"
+        f" dedupe_dropped={dropped_by_dedupe}"
+        f" returned={len(out)}"
+        f" sampled={used_sampling}"
+    )
 
     conn.close()
-    if sample > 0 and len(out) > sample:
-        return random.sample(out, sample)
     return out
