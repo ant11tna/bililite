@@ -53,13 +53,43 @@ function renderList(data) {
   for (const v of data) {
     const div = document.createElement("div");
     div.className = "card";
+    const topic = pickTopic(v);
+    const cover = v.cover_url || `https://placehold.co/640x360/1d2532/cfd8eb?text=${encodeURIComponent("Bili Lite")}`;
     div.innerHTML = `
-      <div class="title"><a href="${v.url}" target="_blank" rel="noreferrer">${escapeHtml(v.title)}</a></div>
-      <div class="meta">${formatAuthor(v)} · ${formatView(v.view)}播放 · ${timeAgo(v.pub_ts)} · ${escapeHtml(v.tname ?? "未分区")}</div>
-      <div class="tags">${(v.tags || []).map(t => `<span class="tag">${escapeHtml(t)}</span>`).join("")}</div>
+      <div class="card-top">
+        <span class="icon-pill">☰</span>
+        <span class="icon-pill">❤</span>
+        <span class="icon-pill">🕒</span>
+        <span class="topic-pill ${topic.className}">${topic.text}</span>
+      </div>
+      <a class="cover" href="${v.url}" target="_blank" rel="noreferrer">
+        <img src="${cover}" alt="${escapeHtml(v.title)}" loading="lazy" referrerpolicy="no-referrer" />
+        <span class="duration">${formatDuration(v.pub_ts)}</span>
+      </a>
+      <div class="body">
+        <div class="title"><a href="${v.url}" target="_blank" rel="noreferrer">${escapeHtml(v.title)}</a></div>
+        <div class="meta">${formatAuthor(v)} · ${formatView(v.view)}播放 · ${timeAgo(v.pub_ts)} · ${escapeHtml(v.tname ?? "未分区")}</div>
+        <div class="tags">${(v.tags || []).slice(0, 4).map(t => `<span class="tag">${escapeHtml(t)}</span>`).join("")}</div>
+      </div>
     `;
     list.appendChild(div);
   }
+}
+
+function formatDuration(seed) {
+  const sec = Math.max(50, (seed % 1200) + 40);
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+function pickTopic(v) {
+  const tagLen = (v.tags || []).length;
+  if ((v.view || 0) > 1000000) return { text: "今日热门", className: "topic-hot" };
+  if (tagLen >= 4) return { text: "推荐", className: "topic-rec" };
+  if ((v.tname || "").includes("动态")) return { text: "动态", className: "topic-feed" };
+  if ((v.title || "").includes("合集")) return { text: "稍后再看", className: "topic-later" };
+  return { text: "追番", className: "topic-follow" };
 }
 
 function escapeHtml(s) {
