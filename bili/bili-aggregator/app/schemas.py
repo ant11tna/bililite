@@ -1,5 +1,8 @@
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional, List, Literal
+
+VideoState = Literal["NEW", "LATER", "STAR", "WATCHED", "HIDDEN"]
+
 
 class VideoOut(BaseModel):
     bvid: str
@@ -7,8 +10,21 @@ class VideoOut(BaseModel):
     author_name: Optional[str] = None  # ✅ 新增
     title: str
     pub_ts: int
+    duration_sec: Optional[int] = None
+    state: VideoState = "NEW"
     url: str
     cover_url: Optional[str] = None
     tname: Optional[str] = None
     view: Optional[int] = None
     tags: List[str] = []  # 若你愿意更规范：= Field(default_factory=list)
+
+
+class VideoStateUpdateIn(BaseModel):
+    bvid: str
+    state: VideoState
+
+
+class VideoStateOut(BaseModel):
+    bvid: str
+    state: VideoState
+    updated_ts: int

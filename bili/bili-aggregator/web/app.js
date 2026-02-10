@@ -1,3 +1,14 @@
+const STATE = {
+  NEW: "NEW",
+  LATER: "LATER",
+  STAR: "STAR",
+  WATCHED: "WATCHED",
+  HIDDEN: "HIDDEN",
+};
+
+let currentVideos = [];
+let undoAction = null;
+
 async function loadGroups() {
   const select = document.getElementById("group");
   try {
@@ -36,14 +47,15 @@ async function load() {
 
   const res = await fetch(`/api/videos?${params.toString()}`);
   const data = await res.json();
-
-  renderList(data);
+  currentVideos = data;
+  renderList(currentVideos);
 }
 
 async function loadDaily() {
   const res = await fetch("/api/daily");
   const data = await res.json();
-  renderList(data);
+  currentVideos = data;
+  renderList(currentVideos);
 }
 
 function renderList(data) {
@@ -53,31 +65,144 @@ function renderList(data) {
   for (const v of data) {
     const div = document.createElement("div");
     div.className = "card";
+    div.dataset.bvid = v.bvid;
     const topic = pickTopic(v);
     const cover = v.cover_url || `https://placehold.co/640x360/1d2532/cfd8eb?text=${encodeURIComponent("Bili Lite")}`;
+    const state = v.state || STATE.NEW;
     div.innerHTML = `
       <div class="card-top">
-        <span class="icon-pill">☰</span>
-        <span class="icon-pill">❤</span>
-        <span class="icon-pill">🕒</span>
+        <button class="icon-pill state-btn" type="button" title="打开详情" data-action="open" data-bvid="${v.bvid}" data-url="${v.url}">☰</button>
+        <button class="icon-pill state-btn ${state === STATE.STAR ? "active" : ""}" type="button" title="收藏" data-action="star" data-bvid="${v.bvid}">❤</button>
+        <button class="icon-pill state-btn ${state === STATE.LATER ? "active" : ""}" type="button" title="稍后看" data-action="later" data-bvid="${v.bvid}">🕒</button>
         <span class="topic-pill ${topic.className}">${topic.text}</span>
       </div>
       <a class="cover" href="${v.url}" target="_blank" rel="noreferrer">
         <img src="${cover}" alt="${escapeHtml(v.title)}" loading="lazy" referrerpolicy="no-referrer" />
-        <span class="duration">${formatDuration(v.pub_ts)}</span>
+        <span class="duration">${formatDuration(v.duration_sec)}</span>
       </a>
       <div class="body">
         <div class="title"><a href="${v.url}" target="_blank" rel="noreferrer">${escapeHtml(v.title)}</a></div>
         <div class="meta">${formatAuthor(v)} · ${formatView(v.view)}播放 · ${timeAgo(v.pub_ts)} · ${escapeHtml(v.tname ?? "未分区")}</div>
-        <div class="tags">${(v.tags || []).slice(0, 4).map(t => `<span class="tag">${escapeHtml(t)}</span>`).join("")}</div>
+        <div class="tags">${(v.tags || []).slice(0, 4).map((t) => `<span class="tag">${escapeHtml(t)}</span>`).join("")}</div>
       </div>
     `;
     list.appendChild(div);
   }
 }
 
-function formatDuration(seed) {
-  const sec = Math.max(50, (seed % 1200) + 40);
+async function updateVideoState(bvid, nextState) {
+  const video = currentVideos.find((item) => item.bvid === bvid);
+  if (!video) return;
+
+  const oldState = video.state || STATE.NEW;
+  if (oldState === nextState) return;
+
+  // optimistic update
+  video.state = nextState;
+  if (nextState === STATE.HIDDEN) {
+    currentVideos = currentVideos.filter((item) => item.bvid !== bvid);
+  }
+  renderList(currentVideos);
+
+  try {
+    await persistState(bvid, nextState);
+    showUndoToast(messageForState(nextState), { bvid, fromState: oldState, toState: nextState });
+  } catch (err) {
+    const rollbackVideo = currentVideos.find((item) => item.bvid === bvid);
+    if (rollbackVideo) {
+      rollbackVideo.state = oldState;
+    } else {
+      await load();
+      showToast(`保存失败：${err.message || "请稍后重试"}`);
+      return;
+    }
+    renderList(currentVideos);
+    showToast(`保存失败：${err.message || "请稍后重试"}`);
+  }
+}
+
+async function persistState(bvid, state) {
+  const res = await fetch("/api/state", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ bvid, state }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || `HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
+function messageForState(state) {
+  if (state === STATE.LATER) return "已加入稍后看";
+  if (state === STATE.STAR) return "已加入收藏";
+  if (state === STATE.WATCHED) return "已标记已看";
+  if (state === STATE.HIDDEN) return "已隐藏";
+  return "状态已更新";
+}
+
+function showUndoToast(message, action) {
+  undoAction = action;
+  showToast(message, true);
+}
+
+function showToast(message, canUndo = false) {
+  const root = document.getElementById("toast");
+  if (!root) return;
+  root.innerHTML = "";
+
+  const msg = document.createElement("span");
+  msg.className = "toast-message";
+  msg.textContent = message;
+  root.appendChild(msg);
+
+  if (canUndo && undoAction) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "toast-undo";
+    btn.textContent = "撤销";
+    btn.addEventListener("click", undoLatestAction);
+    root.appendChild(btn);
+  }
+
+  root.classList.add("show");
+  window.clearTimeout(showToast.timer);
+  showToast.timer = window.setTimeout(() => {
+    root.classList.remove("show");
+    root.innerHTML = "";
+    undoAction = null;
+  }, 3600);
+}
+
+async function undoLatestAction() {
+  if (!undoAction) return;
+  const { bvid, fromState, toState } = undoAction;
+  undoAction = null;
+
+  const video = currentVideos.find((item) => item.bvid === bvid);
+  if (toState === STATE.HIDDEN && !video) {
+    await load();
+  }
+
+  const rollbackVideo = currentVideos.find((item) => item.bvid === bvid);
+  if (rollbackVideo) {
+    rollbackVideo.state = fromState;
+    renderList(currentVideos);
+  }
+
+  try {
+    await persistState(bvid, fromState);
+    showToast("已撤销");
+  } catch (err) {
+    await load();
+    showToast(`撤销失败：${err.message || "请稍后重试"}`);
+  }
+}
+
+function formatDuration(durationSec) {
+  if (durationSec == null || Number.isNaN(Number(durationSec))) return "--:--";
+  const sec = Math.max(0, Math.floor(Number(durationSec)));
   const m = Math.floor(sec / 60);
   const s = sec % 60;
   return `${m}:${String(s).padStart(2, "0")}`;
@@ -94,7 +219,11 @@ function pickTopic(v) {
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({
-    "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
   }[c]));
 }
 
@@ -120,5 +249,28 @@ function formatAuthor(v) {
 
 document.getElementById("btn").addEventListener("click", load);
 document.getElementById("dailyBtn").addEventListener("click", loadDaily);
+document.getElementById("list").addEventListener("click", (event) => {
+  const btn = event.target.closest(".state-btn");
+  if (!btn) return;
+  event.preventDefault();
+
+  const bvid = btn.dataset.bvid;
+  const action = btn.dataset.action;
+  if (!bvid || !action) return;
+
+  if (action === "open") {
+    const url = btn.dataset.url;
+    if (url) window.open(url, "_blank", "noopener,noreferrer");
+    return;
+  }
+  if (action === "later") {
+    updateVideoState(bvid, STATE.LATER);
+    return;
+  }
+  if (action === "star") {
+    updateVideoState(bvid, STATE.STAR);
+  }
+});
+
 loadGroups();
 load();
