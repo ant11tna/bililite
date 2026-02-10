@@ -51,6 +51,15 @@ CREATE TABLE IF NOT EXISTS video_tags (
 
 CREATE INDEX IF NOT EXISTS idx_video_tags_tag ON video_tags(tag);
 
+
+CREATE TABLE IF NOT EXISTS video_state (
+  bvid TEXT PRIMARY KEY,
+  state TEXT NOT NULL,
+  updated_ts INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_video_state_state ON video_state(state);
+
 CREATE TABLE IF NOT EXISTS push_log (
   bvid TEXT PRIMARY KEY,
   channel TEXT NOT NULL,

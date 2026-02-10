@@ -5,13 +5,14 @@ import time
 import yaml
 
 from .db import connect, init_db
-from .schemas import VideoOut
+from .schemas import VideoOut, VideoState, VideoStateOut, VideoStateUpdateIn
 
 app = FastAPI()
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
 app.mount("/static", StaticFiles(directory="web"), name="static")
+
 
 @app.get("/")
 def home():
@@ -22,6 +23,7 @@ def load_config() -> dict:
     with open("config.yaml", "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
+
 @app.get("/api/videos", response_model=List[VideoOut])
 def list_videos(
     q: Optional[str] = None,
@@ -31,6 +33,7 @@ def list_videos(
     group: Optional[str] = None,
     view_min: Optional[int] = None,
     view_max: Optional[int] = None,
+    state: Optional[VideoState] = None,
     only_whitelist: bool = True,
     sort: str = Query("pub", pattern="^(pub|view)$"),
     limit: int = Query(50, ge=1, le=200),
@@ -67,37 +70,107 @@ def list_videos(
         where.append("c.group_name=?")
         params.append(group)
 
+    if state:
+        where.append("COALESCE(s.state, 'NEW')=?")
+        params.append(state)
+    else:
+        where.append("COALESCE(s.state, 'NEW') != 'HIDDEN'")
+
     where_sql = ("WHERE " + " AND ".join(where)) if where else ""
     order_sql = "ORDER BY v.pub_ts DESC" if sort == "pub" else "ORDER BY COALESCE(v.view,0) DESC, v.pub_ts DESC"
 
     sql = f"""
-      SELECT v.bvid, v.uid, v.author_name, v.title, v.pub_ts, v.url, v.cover_url, v.tname, v.view
+      SELECT v.bvid, v.uid, v.author_name, v.title, v.pub_ts, v.duration_sec, v.url, v.cover_url, v.tname, v.view,
+             COALESCE(s.state, 'NEW') AS state
       FROM videos v
       LEFT JOIN creators c ON c.uid = v.uid
+      LEFT JOIN video_state s ON s.bvid = v.bvid
       {where_sql}
       {order_sql}
       LIMIT ? OFFSET ?
     """
     rows = conn.execute(sql, (*params, limit, offset)).fetchall()
-    
+
     out: List[VideoOut] = []
     for r in rows:
         tags = conn.execute("SELECT tag FROM video_tags WHERE bvid=? ORDER BY tag", (r["bvid"],)).fetchall()
-        out.append(VideoOut(
-            bvid=r["bvid"],
-            uid=r["uid"],
-            author_name=r["author_name"],
-            title=r["title"],
-            pub_ts=r["pub_ts"],
-            url=r["url"],
-            cover_url=r["cover_url"],
-            tname=r["tname"],
-            view=r["view"],
-            tags=[t["tag"] for t in tags],
-        ))
+        out.append(
+            VideoOut(
+                bvid=r["bvid"],
+                uid=r["uid"],
+                author_name=r["author_name"],
+                title=r["title"],
+                pub_ts=r["pub_ts"],
+                duration_sec=r["duration_sec"],
+                state=r["state"],
+                url=r["url"],
+                cover_url=r["cover_url"],
+                tname=r["tname"],
+                view=r["view"],
+                tags=[t["tag"] for t in tags],
+            )
+        )
 
     conn.close()
     return out
+
+
+@app.post("/api/state", response_model=VideoStateOut)
+def set_state(payload: VideoStateUpdateIn):
+    cfg = load_config()
+    conn = connect(cfg["app"]["db_path"])
+    init_db(conn)
+
+    updated_ts = int(time.time())
+    conn.execute(
+        """
+        INSERT INTO video_state (bvid, state, updated_ts)
+        VALUES (?, ?, ?)
+        ON CONFLICT(bvid) DO UPDATE SET
+          state=excluded.state,
+          updated_ts=excluded.updated_ts
+        """,
+        (payload.bvid, payload.state, updated_ts),
+    )
+    conn.commit()
+    conn.close()
+    return VideoStateOut(bvid=payload.bvid, state=payload.state, updated_ts=updated_ts)
+
+
+@app.get("/api/state", response_model=List[VideoStateOut])
+def list_state(
+    bvid: Optional[str] = None,
+    state: Optional[VideoState] = None,
+    limit: int = Query(200, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+):
+    cfg = load_config()
+    conn = connect(cfg["app"]["db_path"])
+    init_db(conn)
+
+    where = []
+    params = []
+    if bvid:
+        where.append("bvid=?")
+        params.append(bvid)
+    if state:
+        where.append("state=?")
+        params.append(state)
+
+    where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+    rows = conn.execute(
+        f"""
+        SELECT bvid, state, updated_ts
+        FROM video_state
+        {where_sql}
+        ORDER BY updated_ts DESC
+        LIMIT ? OFFSET ?
+        """,
+        (*params, limit, offset),
+    ).fetchall()
+    conn.close()
+    return [VideoStateOut(bvid=r["bvid"], state=r["state"], updated_ts=r["updated_ts"]) for r in rows]
+
 
 @app.get("/api/creator-groups", response_model=List[str])
 def list_creator_groups():
@@ -115,6 +188,7 @@ def list_creator_groups():
     groups = [r["group_name"] for r in rows]
     conn.close()
     return groups
+
 
 @app.get("/api/daily", response_model=List[VideoOut])
 def list_daily(
@@ -136,7 +210,7 @@ def list_daily(
             group = None
 
     cutoff = int(time.time()) - hours * 3600
-    where = ["c.enabled=1", "v.pub_ts >= ?"]
+    where = ["c.enabled=1", "v.pub_ts >= ?", "COALESCE(s.state, 'NEW') != 'HIDDEN'"]
     params = [cutoff]
     if group:
         where.append("c.group_name=?")
@@ -144,9 +218,11 @@ def list_daily(
 
     where_sql = "WHERE " + " AND ".join(where)
     sql = f"""
-      SELECT v.bvid, v.uid, v.author_name, v.title, v.pub_ts, v.url, v.cover_url, v.tname, v.view
+      SELECT v.bvid, v.uid, v.author_name, v.title, v.pub_ts, v.duration_sec, v.url, v.cover_url, v.tname, v.view,
+             COALESCE(s.state, 'NEW') AS state
       FROM videos v
       LEFT JOIN creators c ON c.uid = v.uid
+      LEFT JOIN video_state s ON s.bvid = v.bvid
       {where_sql}
       ORDER BY v.pub_ts DESC
       LIMIT ?
@@ -156,18 +232,22 @@ def list_daily(
     out: List[VideoOut] = []
     for r in rows:
         tags = conn.execute("SELECT tag FROM video_tags WHERE bvid=? ORDER BY tag", (r["bvid"],)).fetchall()
-        out.append(VideoOut(
-            bvid=r["bvid"],
-            uid=r["uid"],
-            author_name=r["author_name"],
-            title=r["title"],
-            pub_ts=r["pub_ts"],
-            url=r["url"],
-            cover_url=r["cover_url"],
-            tname=r["tname"],
-            view=r["view"],
-            tags=[t["tag"] for t in tags],
-        ))
+        out.append(
+            VideoOut(
+                bvid=r["bvid"],
+                uid=r["uid"],
+                author_name=r["author_name"],
+                title=r["title"],
+                pub_ts=r["pub_ts"],
+                duration_sec=r["duration_sec"],
+                state=r["state"],
+                url=r["url"],
+                cover_url=r["cover_url"],
+                tname=r["tname"],
+                view=r["view"],
+                tags=[t["tag"] for t in tags],
+            )
+        )
 
     conn.close()
     if sample > 0 and len(out) > sample:

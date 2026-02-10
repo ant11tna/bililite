@@ -217,3 +217,54 @@ h1 { font-size: 28px; margin: 6px 0; font-weight: 700; }
   .bar { gap: 8px; }
   .bar input, .bar select { min-width: 46%; }
 }
+
+.icon-pill.state-btn {
+  border: none;
+  cursor: pointer;
+}
+
+.icon-pill.state-btn.active {
+  color: #fff;
+  background: rgba(61, 139, 245, 0.55);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.18) inset;
+}
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%) translateY(20px);
+  opacity: 0;
+  pointer-events: none;
+  transition: all 0.2s ease;
+  display: inline-flex;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 14px;
+  border-radius: 999px;
+  background: rgba(12, 16, 23, 0.92);
+  border: 1px solid var(--line);
+  box-shadow: 0 12px 24px rgba(0, 0, 0, 0.28);
+  z-index: 1000;
+}
+
+.toast.show {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateX(-50%) translateY(0);
+}
+
+.toast-message {
+  font-size: 13px;
+}
+
+.toast-undo {
+  border: none;
+  border-radius: 999px;
+  padding: 4px 10px;
+  background: linear-gradient(135deg, #2ec7d4, #3d8bf5);
+  color: #fff;
+  font-weight: 700;
+  cursor: pointer;
+}
+
