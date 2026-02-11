@@ -63,10 +63,10 @@ pip download \
   -d vendor/wheels
 ```
 
-## 一键启动（0.0.0.0:8000）
+## 一键启动（0.0.0.0:9000）
 
 ```bash
-python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+python -m uvicorn app.main:app --host 0.0.0.0 --port 9000
 ```
 
 ## Server酱每日推送（今日必看候选）
@@ -129,7 +129,32 @@ crontab -e
 ## 自测命令
 
 ```bash
-curl -i http://127.0.0.1:8000/docs
-curl -i "http://127.0.0.1:8000/api/videos?limit=1"
-curl -i http://127.0.0.1:8000/api/creator-groups
+curl -i http://127.0.0.1:9000/docs
+curl -i "http://127.0.0.1:9000/api/videos?limit=1"
+curl -i http://127.0.0.1:9000/api/creator-groups
+curl -i http://127.0.0.1:9000/api/creators
+```
+
+
+## Creator 维度增强（priority/weight）
+
+数据库 `creators` 表新增字段（兼容旧库自动迁移）：
+
+- `author_name`
+- `priority INTEGER NOT NULL DEFAULT 0`
+- `weight INTEGER NOT NULL DEFAULT 1`
+
+启动任意 API/抓取流程后会自动执行迁移。
+
+新增 API：
+
+- `GET /api/creators`：查看所有 creator 的 `uid/author_name/enabled/priority/weight`
+- `POST /api/creators`：批量更新 creator 的 `enabled/priority/weight`
+
+示例：
+
+```bash
+curl -X POST http://127.0.0.1:9000/api/creators \
+  -H 'Content-Type: application/json' \
+  -d '[{"uid":123456,"priority":10,"weight":3,"enabled":true}]'
 ```

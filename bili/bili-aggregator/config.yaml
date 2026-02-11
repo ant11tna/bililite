@@ -37,7 +37,11 @@ creators:
     name: "UP1"
     group: "默认"
     enabled: true
+    priority: 0
+    weight: 1
   - uid: 234567
     name: "UP2"
     group: "分组B"
     enabled: true
+    priority: 0
+    weight: 1

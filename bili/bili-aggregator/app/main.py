@@ -4,7 +4,14 @@ import random
 import time
 from .config import load_config
 from .db import connect, init_db
-from .schemas import VideoOut, VideoState, VideoStateOut, VideoStateUpdateIn
+from .schemas import (
+    CreatorOut,
+    CreatorUpdateIn,
+    VideoOut,
+    VideoState,
+    VideoStateOut,
+    VideoStateUpdateIn,
+)
 
 app = FastAPI()
 from fastapi.staticfiles import StaticFiles
@@ -108,6 +115,95 @@ def list_videos(
     conn.close()
     return out
 
+
+
+
+@app.get("/api/creators", response_model=List[CreatorOut])
+def list_creators():
+    cfg = load_config()
+    conn = connect(cfg["app"]["db_path"])
+    init_db(conn)
+
+    rows = conn.execute(
+        """
+        SELECT uid, COALESCE(author_name, name) AS author_name, enabled, priority, weight
+        FROM creators
+        ORDER BY uid
+        """
+    ).fetchall()
+    conn.close()
+
+    return [
+        CreatorOut(
+            uid=r["uid"],
+            author_name=r["author_name"],
+            enabled=bool(r["enabled"]),
+            priority=r["priority"],
+            weight=r["weight"],
+        )
+        for r in rows
+    ]
+
+
+@app.post("/api/creators", response_model=List[CreatorOut])
+def update_creators(payload: List[CreatorUpdateIn]):
+    cfg = load_config()
+    conn = connect(cfg["app"]["db_path"])
+    init_db(conn)
+
+    for item in payload:
+        current = conn.execute(
+            "SELECT uid, enabled, priority, weight FROM creators WHERE uid=?",
+            (item.uid,),
+        ).fetchone()
+        if not current:
+            conn.execute(
+                """
+                INSERT INTO creators(uid, author_name, name, enabled, priority, weight)
+                VALUES (?, NULL, NULL, ?, ?, ?)
+                """,
+                (
+                    item.uid,
+                    1 if (item.enabled if item.enabled is not None else True) else 0,
+                    item.priority if item.priority is not None else 0,
+                    max(1, item.weight if item.weight is not None else 1),
+                ),
+            )
+            continue
+
+        enabled = current["enabled"] if item.enabled is None else (1 if item.enabled else 0)
+        priority = current["priority"] if item.priority is None else item.priority
+        weight = current["weight"] if item.weight is None else max(1, item.weight)
+
+        conn.execute(
+            """
+            UPDATE creators
+            SET enabled=?, priority=?, weight=?
+            WHERE uid=?
+            """,
+            (enabled, priority, weight, item.uid),
+        )
+
+    conn.commit()
+    rows = conn.execute(
+        """
+        SELECT uid, COALESCE(author_name, name) AS author_name, enabled, priority, weight
+        FROM creators
+        ORDER BY uid
+        """
+    ).fetchall()
+    conn.close()
+
+    return [
+        CreatorOut(
+            uid=r["uid"],
+            author_name=r["author_name"],
+            enabled=bool(r["enabled"]),
+            priority=r["priority"],
+            weight=r["weight"],
+        )
+        for r in rows
+    ]
 
 @app.post("/api/state", response_model=VideoStateOut)
 def set_state(payload: VideoStateUpdateIn):
@@ -213,7 +309,9 @@ def list_daily(
     where_sql = "WHERE " + " AND ".join(where)
     sql = f"""
       SELECT v.bvid, v.uid, v.author_name, v.title, v.pub_ts, v.duration_sec, v.url, v.cover_url, v.tname, v.view,
-             COALESCE(s.state, 'NEW') AS state
+             COALESCE(s.state, 'NEW') AS state,
+             COALESCE(c.priority, 0) AS creator_priority,
+             COALESCE(c.weight, 1) AS creator_weight
       FROM videos v
       LEFT JOIN creators c ON c.uid = v.uid
       LEFT JOIN video_state s ON s.bvid = v.bvid
@@ -244,6 +342,9 @@ def list_daily(
         )
 
     conn.close()
+
+    # Stage 1 preparation: creator_priority / creator_weight are loaded above
+    # for future weighted daily sampling, but current behavior remains random.sample.
     if sample > 0 and len(out) > sample:
         return random.sample(out, sample)
     return out
