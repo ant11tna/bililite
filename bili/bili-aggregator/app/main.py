@@ -20,10 +20,48 @@ from fastapi.responses import FileResponse
 app.mount("/static", StaticFiles(directory="web"), name="static")
 
 
+def _weighted_sample_without_replacement(
+    items: List[dict],
+    k: int,
+    rng: random.Random,
+) -> List[dict]:
+    """
+    Weighted sampling without replacement.
+    items: [{"uid": int, "weight": int, ...}, ...]
+    """
+    if k <= 0 or not items:
+        return []
+
+    pool = list(items)
+    chosen: List[dict] = []
+
+    while pool and len(chosen) < k:
+        total_weight = sum(max(1, int(it.get("weight", 1))) for it in pool)
+        pick = rng.uniform(0, total_weight)
+        acc = 0.0
+
+        chosen_index = len(pool) - 1
+        for idx, it in enumerate(pool):
+            acc += max(1, int(it.get("weight", 1)))
+            if acc >= pick:
+                chosen_index = idx
+                break
+
+        chosen.append(pool.pop(chosen_index))
+
+    return chosen
+
+
 @app.get("/")
 def home():
     return FileResponse("web/index.html")
 
+
+
+
+@app.get("/creators")
+def creators_page():
+    return FileResponse("web/creators.html")
 
 @app.get("/api/videos", response_model=List[VideoOut])
 def list_videos(
@@ -75,7 +113,7 @@ def list_videos(
         where.append("COALESCE(s.state, 'NEW')=?")
         params.append(state)
     else:
-        where.append("COALESCE(s.state, 'NEW') != 'HIDDEN'")
+        where.append("COALESCE(s.state, 'NEW') NOT IN ('HIDDEN', 'READ')")
 
     where_sql = ("WHERE " + " AND ".join(where)) if where else ""
     order_sql = "ORDER BY v.pub_ts DESC" if sort == "pub" else "ORDER BY COALESCE(v.view,0) DESC, v.pub_ts DESC"
@@ -285,7 +323,8 @@ def list_daily(
     group: Optional[str] = "必看",
     hours: int = Query(24, ge=1, le=168),
     limit: int = Query(50, ge=1, le=200),
-    sample: int = Query(5, ge=0, le=200),
+    sample: int = Query(1, ge=0, le=200),
+    seed: Optional[int] = Query(None),
 ):
     cfg = load_config()
     conn = connect(cfg["app"]["db_path"])
@@ -300,7 +339,7 @@ def list_daily(
             group = None
 
     cutoff = int(time.time()) - hours * 3600
-    where = ["c.enabled=1", "v.pub_ts >= ?", "COALESCE(s.state, 'NEW') != 'HIDDEN'"]
+    where = ["c.enabled=1", "v.pub_ts >= ?", "COALESCE(s.state, 'NEW') NOT IN ('HIDDEN', 'READ')"]
     params = [cutoff]
     if group:
         where.append("c.group_name=?")
@@ -317,12 +356,56 @@ def list_daily(
       LEFT JOIN video_state s ON s.bvid = v.bvid
       {where_sql}
       ORDER BY v.pub_ts DESC
-      LIMIT ?
+      LIMIT 2000
     """
-    rows = conn.execute(sql, (*params, limit)).fetchall()
+    rows = conn.execute(sql, tuple(params)).fetchall()
+
+    # 每个 creator 仅保留最新一条（creator 粒度）
+    latest_by_creator = {}
+    for r in rows:
+        uid = int(r["uid"])
+        if uid not in latest_by_creator:
+            latest_by_creator[uid] = r
+
+    latest_rows = list(latest_by_creator.values())
+
+    # Phase 1: 必看 creator（priority > 0），按 priority DESC，再按最新时间
+    must_watch_rows = sorted(
+        [r for r in latest_rows if int(r["creator_priority"] or 0) > 0],
+        key=lambda r: (-int(r["creator_priority"] or 0), -int(r["pub_ts"] or 0)),
+    )
+
+    selected_rows = must_watch_rows[:limit]
+    if len(selected_rows) >= limit:
+        final_rows = selected_rows
+    else:
+        # Phase 2 候选：普通 creator（priority=0）
+        normal_rows = [r for r in latest_rows if int(r["creator_priority"] or 0) <= 0]
+        remaining = limit - len(selected_rows)
+
+        if sample == 0:
+            # 关闭权重抽样：按时间顺序回退
+            normal_rows = sorted(normal_rows, key=lambda r: -int(r["pub_ts"] or 0))
+            selected_rows.extend(normal_rows[:remaining])
+        else:
+            rng = random.Random(seed)
+            weighted_pool = [
+                {
+                    "uid": int(r["uid"]),
+                    "weight": max(1, int(r["creator_weight"] or 1)),
+                    "row": r,
+                }
+                for r in normal_rows
+            ]
+            picked = _weighted_sample_without_replacement(weighted_pool, remaining, rng)
+            # 为结果稳定可读，抽样后按发布时间降序展示
+            picked_rows = sorted([it["row"] for it in picked], key=lambda r: -int(r["pub_ts"] or 0))
+            selected_rows.extend(picked_rows)
+
+        final_rows = selected_rows[:limit]
 
     out: List[VideoOut] = []
-    for r in rows:
+    for r in final_rows:
         tags = conn.execute("SELECT tag FROM video_tags WHERE bvid=? ORDER BY tag", (r["bvid"],)).fetchall()
         out.append(
             VideoOut(
@@ -342,9 +425,4 @@ def list_daily(
         )
 
     conn.close()
-
-    # Stage 1 preparation: creator_priority / creator_weight are loaded above
-    # for future weighted daily sampling, but current behavior remains random.sample.
-    if sample > 0 and len(out) > sample:
-        return random.sample(out, sample)
     return out

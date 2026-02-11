@@ -1,7 +1,7 @@
 from pydantic import BaseModel
 from typing import Optional, List, Literal
 
-VideoState = Literal["NEW", "LATER", "STAR", "WATCHED", "HIDDEN"]
+VideoState = Literal["NEW", "READ", "LATER", "STAR", "WATCHED", "HIDDEN"]
 
 
 class VideoOut(BaseModel):
