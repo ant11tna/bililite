@@ -1,13 +1,11 @@
 const STATE = {
   NEW: "NEW",
-  LATER: "LATER",
+  READ: "READ",
   STAR: "STAR",
-  WATCHED: "WATCHED",
   HIDDEN: "HIDDEN",
 };
 
 let currentVideos = [];
-let undoAction = null;
 
 async function loadGroups() {
   const select = document.getElementById("group");
@@ -68,13 +66,18 @@ function renderList(data) {
     div.dataset.bvid = v.bvid;
     const topic = pickTopic(v);
     const cover = v.cover_url || `https://placehold.co/640x360/1d2532/cfd8eb?text=${encodeURIComponent("Bili Lite")}`;
-    const state = v.state || STATE.NEW;
+    const isStarred = !!v.__starred;
+
     div.innerHTML = `
       <div class="card-top">
-        <button class="icon-pill state-btn" type="button" title="打开详情" data-action="open" data-bvid="${v.bvid}" data-url="${v.url}">☰</button>
-        <button class="icon-pill state-btn ${state === STATE.STAR ? "active" : ""}" type="button" title="收藏" data-action="star" data-bvid="${v.bvid}">❤</button>
-        <button class="icon-pill state-btn ${state === STATE.LATER ? "active" : ""}" type="button" title="稍后看" data-action="later" data-bvid="${v.bvid}">🕒</button>
+        <button class="icon-pill state-btn" type="button" title="更多操作" data-action="open" data-bvid="${v.bvid}">☰</button>
+        <button class="icon-pill state-btn ${isStarred ? "active" : ""}" type="button" title="收藏（仅前端高亮）" data-action="star" data-bvid="${v.bvid}">❤</button>
+        <button class="icon-pill state-btn" type="button" title="稍后看（标记已读）" data-action="later" data-bvid="${v.bvid}">🕒</button>
         <span class="topic-pill ${topic.className}">${topic.text}</span>
+      </div>
+      <div class="inline-menu hidden" data-menu="video" data-bvid="${v.bvid}">
+        <button class="menu-item" type="button" data-action="mark-read" data-bvid="${v.bvid}">标记已读</button>
+        <button class="menu-item" type="button" data-action="hide-video" data-bvid="${v.bvid}">隐藏此视频</button>
       </div>
       <a class="cover" href="${v.url}" target="_blank" rel="noreferrer">
         <img src="${cover}" alt="${escapeHtml(v.title)}" loading="lazy" referrerpolicy="no-referrer" />
@@ -82,7 +85,15 @@ function renderList(data) {
       </a>
       <div class="body">
         <div class="title"><a href="${v.url}" target="_blank" rel="noreferrer">${escapeHtml(v.title)}</a></div>
-        <div class="meta">${formatAuthor(v)} · ${formatView(v.view)}播放 · ${timeAgo(v.pub_ts)} · ${escapeHtml(v.tname ?? "未分区")}</div>
+        <div class="meta-row">
+          <div class="meta">${formatAuthor(v)} · ${formatView(v.view)}播放 · ${timeAgo(v.pub_ts)} · ${escapeHtml(v.tname ?? "未分区")}</div>
+          <button class="creator-mini-btn" type="button" title="创作者操作" data-action="creator-open" data-uid="${v.uid}">⋯</button>
+        </div>
+        <div class="inline-menu hidden" data-menu="creator" data-uid="${v.uid}">
+          <button class="menu-item" type="button" data-action="creator-must" data-uid="${v.uid}">设为必看</button>
+          <button class="menu-item" type="button" data-action="creator-unmust" data-uid="${v.uid}">取消必看</button>
+          <button class="menu-item" type="button" data-action="creator-hide" data-uid="${v.uid}">隐藏该作者</button>
+        </div>
         <div class="tags">${(v.tags || []).slice(0, 4).map((t) => `<span class="tag">${escapeHtml(t)}</span>`).join("")}</div>
       </div>
     `;
@@ -90,38 +101,7 @@ function renderList(data) {
   }
 }
 
-async function updateVideoState(bvid, nextState) {
-  const video = currentVideos.find((item) => item.bvid === bvid);
-  if (!video) return;
-
-  const oldState = video.state || STATE.NEW;
-  if (oldState === nextState) return;
-
-  // optimistic update
-  video.state = nextState;
-  if (nextState === STATE.HIDDEN) {
-    currentVideos = currentVideos.filter((item) => item.bvid !== bvid);
-  }
-  renderList(currentVideos);
-
-  try {
-    await persistState(bvid, nextState);
-    showUndoToast(messageForState(nextState), { bvid, fromState: oldState, toState: nextState });
-  } catch (err) {
-    const rollbackVideo = currentVideos.find((item) => item.bvid === bvid);
-    if (rollbackVideo) {
-      rollbackVideo.state = oldState;
-    } else {
-      await load();
-      showToast(`保存失败：${err.message || "请稍后重试"}`);
-      return;
-    }
-    renderList(currentVideos);
-    showToast(`保存失败：${err.message || "请稍后重试"}`);
-  }
-}
-
-async function persistState(bvid, state) {
+async function postVideoState(bvid, state) {
   const res = await fetch("/api/state", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -134,69 +114,99 @@ async function persistState(bvid, state) {
   return res.json();
 }
 
-function messageForState(state) {
-  if (state === STATE.LATER) return "已加入稍后看";
-  if (state === STATE.STAR) return "已加入收藏";
-  if (state === STATE.WATCHED) return "已标记已看";
-  if (state === STATE.HIDDEN) return "已隐藏";
-  return "状态已更新";
+async function postCreatorUpdate(uid, patch) {
+  const payload = [{ uid, ...patch }];
+  const res = await fetch("/api/creators", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || `HTTP ${res.status}`);
+  }
+  return res.json();
 }
 
-function showUndoToast(message, action) {
-  undoAction = action;
-  showToast(message, true);
+function removeVideoFromCurrentList(bvid) {
+  currentVideos = currentVideos.filter((item) => item.bvid !== bvid);
+  renderList(currentVideos);
 }
 
-function showToast(message, canUndo = false) {
-  const root = document.getElementById("toast");
-  if (!root) return;
-  root.innerHTML = "";
-
-  const msg = document.createElement("span");
-  msg.className = "toast-message";
-  msg.textContent = message;
-  root.appendChild(msg);
-
-  if (canUndo && undoAction) {
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = "toast-undo";
-    btn.textContent = "撤销";
-    btn.addEventListener("click", undoLatestAction);
-    root.appendChild(btn);
-  }
-
-  root.classList.add("show");
-  window.clearTimeout(showToast.timer);
-  showToast.timer = window.setTimeout(() => {
-    root.classList.remove("show");
-    root.innerHTML = "";
-    undoAction = null;
-  }, 3600);
+function removeCreatorVideosFromCurrentList(uid) {
+  currentVideos = currentVideos.filter((item) => Number(item.uid) !== Number(uid));
+  renderList(currentVideos);
 }
 
-async function undoLatestAction() {
-  if (!undoAction) return;
-  const { bvid, fromState, toState } = undoAction;
-  undoAction = null;
+function closeAllMenus() {
+  document.querySelectorAll(".inline-menu").forEach((el) => el.classList.add("hidden"));
+}
 
-  const video = currentVideos.find((item) => item.bvid === bvid);
-  if (toState === STATE.HIDDEN && !video) {
-    await load();
-  }
+function toggleVideoMenu(bvid) {
+  const target = document.querySelector(`.inline-menu[data-menu='video'][data-bvid='${CSS.escape(bvid)}']`);
+  if (!target) return;
+  const willOpen = target.classList.contains("hidden");
+  closeAllMenus();
+  if (willOpen) target.classList.remove("hidden");
+}
 
-  const rollbackVideo = currentVideos.find((item) => item.bvid === bvid);
-  if (rollbackVideo) {
-    rollbackVideo.state = fromState;
-    renderList(currentVideos);
-  }
+function toggleCreatorMenu(uid) {
+  const target = document.querySelector(`.inline-menu[data-menu='creator'][data-uid='${CSS.escape(String(uid))}']`);
+  if (!target) return;
+  const willOpen = target.classList.contains("hidden");
+  closeAllMenus();
+  if (willOpen) target.classList.remove("hidden");
+}
 
+async function handleVideoRead(bvid) {
   try {
-    await persistState(bvid, fromState);
-    showToast("已撤销");
+    await postVideoState(bvid, STATE.READ);
+    removeVideoFromCurrentList(bvid);
   } catch (err) {
-    await load();
-    showToast(`撤销失败：${err.message || "请稍后重试"}`);
+    console.warn("mark read failed", bvid, err);
+  }
+}
+
+async function handleVideoHidden(bvid) {
+  try {
+    await postVideoState(bvid, STATE.HIDDEN);
+    removeVideoFromCurrentList(bvid);
+  } catch (err) {
+    console.warn("hide video failed", bvid, err);
+  }
+}
+
+function handleStarToggle(bvid) {
+  const v = currentVideos.find((item) => item.bvid === bvid);
+  if (!v) return;
+  v.__starred = !v.__starred;
+  renderList(currentVideos);
+}
+
+async function handleCreatorMust(uid) {
+  try {
+    await postCreatorUpdate(uid, { priority: 10 });
+    removeCreatorVideosFromCurrentList(uid);
+  } catch (err) {
+    console.warn("set must-watch failed", uid, err);
+  }
+}
+
+async function handleCreatorUnMust(uid) {
+  try {
+    await postCreatorUpdate(uid, { priority: 0 });
+    removeCreatorVideosFromCurrentList(uid);
+  } catch (err) {
+    console.warn("unset must-watch failed", uid, err);
+  }
+}
+
+async function handleCreatorHide(uid) {
+  try {
+    await postCreatorUpdate(uid, { enabled: false });
+    removeCreatorVideosFromCurrentList(uid);
+  } catch (err) {
+    console.warn("hide creator failed", uid, err);
   }
 }
 
@@ -249,26 +259,59 @@ function formatAuthor(v) {
 
 document.getElementById("btn").addEventListener("click", load);
 document.getElementById("dailyBtn").addEventListener("click", loadDaily);
-document.getElementById("list").addEventListener("click", (event) => {
-  const btn = event.target.closest(".state-btn");
+document.addEventListener("click", (event) => {
+  if (!event.target.closest(".inline-menu") && !event.target.closest(".state-btn") && !event.target.closest(".creator-mini-btn")) {
+    closeAllMenus();
+  }
+});
+
+document.getElementById("list").addEventListener("click", async (event) => {
+  const btn = event.target.closest("button");
   if (!btn) return;
+
+  const action = btn.dataset.action;
+  if (!action) return;
   event.preventDefault();
 
   const bvid = btn.dataset.bvid;
-  const action = btn.dataset.action;
-  if (!bvid || !action) return;
+  const uid = btn.dataset.uid;
 
-  if (action === "open") {
-    const url = btn.dataset.url;
-    if (url) window.open(url, "_blank", "noopener,noreferrer");
+  if (action === "open" && bvid) {
+    toggleVideoMenu(bvid);
     return;
   }
-  if (action === "later") {
-    updateVideoState(bvid, STATE.LATER);
+  if (action === "star" && bvid) {
+    handleStarToggle(bvid);
     return;
   }
-  if (action === "star") {
-    updateVideoState(bvid, STATE.STAR);
+  if (action === "later" && bvid) {
+    await handleVideoRead(bvid);
+    return;
+  }
+
+  if (action === "mark-read" && bvid) {
+    await handleVideoRead(bvid);
+    return;
+  }
+  if (action === "hide-video" && bvid) {
+    await handleVideoHidden(bvid);
+    return;
+  }
+
+  if (action === "creator-open" && uid) {
+    toggleCreatorMenu(uid);
+    return;
+  }
+  if (action === "creator-must" && uid) {
+    await handleCreatorMust(Number(uid));
+    return;
+  }
+  if (action === "creator-unmust" && uid) {
+    await handleCreatorUnMust(Number(uid));
+    return;
+  }
+  if (action === "creator-hide" && uid) {
+    await handleCreatorHide(Number(uid));
   }
 });
 
