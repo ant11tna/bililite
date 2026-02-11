@@ -8,8 +8,11 @@ PRAGMA journal_mode=WAL;
 CREATE TABLE IF NOT EXISTS creators (
   uid INTEGER PRIMARY KEY,
   name TEXT,
+  author_name TEXT,
   group_name TEXT,
   enabled INTEGER NOT NULL DEFAULT 1,
+  priority INTEGER NOT NULL DEFAULT 0,
+  weight INTEGER NOT NULL DEFAULT 1,
   last_fetch_at TEXT
 );
 
@@ -75,4 +78,27 @@ def connect(db_path: str) -> sqlite3.Connection:
 
 def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(DDL)
+    _migrate_creators_table(conn)
     conn.commit()
+
+
+def _migrate_creators_table(conn: sqlite3.Connection) -> None:
+    existing_columns = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(creators)").fetchall()
+    }
+
+    if "author_name" not in existing_columns:
+        conn.execute("ALTER TABLE creators ADD COLUMN author_name TEXT")
+    if "priority" not in existing_columns:
+        conn.execute("ALTER TABLE creators ADD COLUMN priority INTEGER NOT NULL DEFAULT 0")
+    if "weight" not in existing_columns:
+        conn.execute("ALTER TABLE creators ADD COLUMN weight INTEGER NOT NULL DEFAULT 1")
+
+    conn.execute(
+        """
+        UPDATE creators
+        SET author_name = COALESCE(author_name, name)
+        WHERE author_name IS NULL OR author_name = ''
+        """
+    )

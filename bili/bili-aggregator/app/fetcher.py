@@ -6,22 +6,32 @@ from . import db
 from .db import connect, init_db
 
 
-def upsert_creator(conn, uid: int, name: str | None, group_name: str | None, enabled: bool) -> None:
+def upsert_creator(
+    conn,
+    uid: int,
+    name: str | None,
+    group_name: str | None,
+    enabled: bool,
+    priority: int = 0,
+    weight: int = 1,
+) -> None:
     conn.execute(
         """
-        INSERT INTO creators(uid, name, group_name, enabled)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO creators(uid, name, author_name, group_name, enabled, priority, weight)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(uid) DO UPDATE SET
           name=excluded.name,
+          author_name=excluded.author_name,
           group_name=excluded.group_name,
-          enabled=excluded.enabled
+          enabled=excluded.enabled,
+          priority=excluded.priority,
+          weight=excluded.weight
         """,
-        (uid, name, group_name, 1 if enabled else 0),
+        (uid, name, name, group_name, 1 if enabled else 0, int(priority), max(1, int(weight))),
     )
 
 def upsert_video(conn, v: Dict, fetched_ts: int) -> None:
     stats = v.get("stats") or {}
-    print("DBG inserting:", v["bvid"], "author_name=", v.get("author_name"), "db=", __file__)
     conn.execute(
         """
         INSERT INTO videos(
@@ -86,7 +96,9 @@ def run_fetch(config: Dict) -> Tuple[int, int]:
             c["uid"],
             c.get("name"),
             c.get("group"),
-            bool(c.get("enabled", True))
+            bool(c.get("enabled", True)),
+            int(c.get("priority", 0)),
+            max(1, int(c.get("weight", 1))),
         )
     conn.commit()
 

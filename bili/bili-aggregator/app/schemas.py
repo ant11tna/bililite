@@ -28,3 +28,18 @@ class VideoStateOut(BaseModel):
     bvid: str
     state: VideoState
     updated_ts: int
+
+
+class CreatorOut(BaseModel):
+    uid: int
+    author_name: Optional[str] = None
+    enabled: bool
+    priority: int = 0
+    weight: int = 1
+
+
+class CreatorUpdateIn(BaseModel):
+    uid: int
+    enabled: Optional[bool] = None
+    priority: Optional[int] = None
+    weight: Optional[int] = None
