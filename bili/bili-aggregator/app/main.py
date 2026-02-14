@@ -6,6 +6,11 @@ from .config import load_config
 from .db import connect, init_db
 from .schemas import (
     CreatorOut,
+    CreatorStatsOut,
+    CreatorTnameMix,
+    StatsCreatorCount,
+    StatsOverviewOut,
+    StatsTnameCount,
     CreatorUpdateIn,
     VideoOut,
     VideoState,
@@ -421,6 +426,322 @@ def list_daily(
                 tname=r["tname"],
                 view=r["view"],
                 tags=[t["tag"] for t in tags],
+            )
+        )
+
+    conn.close()
+    return out
+
+
+@app.get("/stats")
+def stats_page():
+    return FileResponse("web/stats.html")
+
+
+def _has_video_state_updated_ts(conn) -> bool:
+    cols = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(video_state)").fetchall()
+    }
+    return "updated_ts" in cols
+
+
+@app.get("/api/stats/overview", response_model=StatsOverviewOut)
+def stats_overview(
+    days: int = Query(7, ge=1, le=3650),
+    channel: str = Query("serverchan"),
+):
+    cfg = load_config()
+    conn = connect(cfg["app"]["db_path"])
+    init_db(conn)
+
+    cutoff = int(time.time()) - days * 86400
+    note_parts: List[str] = []
+
+    total_creators = int(conn.execute("SELECT COUNT(*) AS c FROM creators").fetchone()["c"] or 0)
+    enabled_creators = int(conn.execute("SELECT COUNT(*) AS c FROM creators WHERE enabled=1").fetchone()["c"] or 0)
+    priority_creators = int(conn.execute("SELECT COUNT(*) AS c FROM creators WHERE priority>0").fetchone()["c"] or 0)
+
+    videos_in_window = int(
+        conn.execute(
+            """
+            SELECT COUNT(*) AS c
+            FROM videos v
+            LEFT JOIN video_state hs ON hs.bvid=v.bvid AND hs.state='HIDDEN'
+            WHERE hs.bvid IS NULL
+              AND v.pub_ts >= ?
+            """,
+            (cutoff,),
+        ).fetchone()["c"]
+        or 0
+    )
+
+    pushed_in_window = int(
+        conn.execute(
+            "SELECT COUNT(*) AS c FROM push_log WHERE channel=? AND pushed_ts>=?",
+            (channel, cutoff),
+        ).fetchone()["c"]
+        or 0
+    )
+
+    distinct_creators_pushed = int(
+        conn.execute(
+            """
+            SELECT COUNT(DISTINCT v.uid) AS c
+            FROM push_log pl
+            JOIN videos v ON v.bvid=pl.bvid
+            WHERE pl.channel=?
+              AND pl.pushed_ts>=?
+            """,
+            (channel, cutoff),
+        ).fetchone()["c"]
+        or 0
+    )
+
+    top_tname_rows = conn.execute(
+        """
+        SELECT COALESCE(NULLIF(TRIM(v.tname),''), '未分区') AS tname, COUNT(*) AS cnt
+        FROM push_log pl
+        JOIN videos v ON v.bvid=pl.bvid
+        WHERE pl.channel=?
+          AND pl.pushed_ts>=?
+        GROUP BY COALESCE(NULLIF(TRIM(v.tname),''), '未分区')
+        ORDER BY cnt DESC, tname ASC
+        LIMIT 5
+        """,
+        (channel, cutoff),
+    ).fetchall()
+    top_tnames_pushed = [StatsTnameCount(tname=r["tname"], cnt=int(r["cnt"] or 0)) for r in top_tname_rows]
+
+    top_creator_rows = conn.execute(
+        """
+        SELECT v.uid AS uid, COALESCE(c.author_name, c.name, v.author_name) AS author_name, COUNT(*) AS cnt
+        FROM push_log pl
+        JOIN videos v ON v.bvid=pl.bvid
+        LEFT JOIN creators c ON c.uid=v.uid
+        WHERE pl.channel=?
+          AND pl.pushed_ts>=?
+        GROUP BY v.uid, COALESCE(c.author_name, c.name, v.author_name)
+        ORDER BY cnt DESC, v.uid ASC
+        LIMIT 10
+        """,
+        (channel, cutoff),
+    ).fetchall()
+    top_creators_pushed = [
+        StatsCreatorCount(uid=int(r["uid"]), author_name=r["author_name"], cnt=int(r["cnt"] or 0))
+        for r in top_creator_rows
+    ]
+
+    if not _has_video_state_updated_ts(conn):
+        note_parts.append("video_state 无 updated_ts，read/hidden 时间窗统计将退化为全量")
+
+    conn.close()
+    return StatsOverviewOut(
+        window_days=days,
+        total_creators=total_creators,
+        enabled_creators=enabled_creators,
+        priority_creators=priority_creators,
+        videos_in_window=videos_in_window,
+        pushed_in_window=pushed_in_window,
+        distinct_creators_pushed=distinct_creators_pushed,
+        top_tnames_pushed=top_tnames_pushed,
+        top_creators_pushed=top_creators_pushed,
+        note="; ".join(note_parts),
+    )
+
+
+@app.get("/api/stats/creators", response_model=List[CreatorStatsOut])
+def list_creator_stats(
+    days: int = Query(30, ge=1, le=3650),
+    channel: str = Query("serverchan"),
+    limit: int = Query(200, ge=1, le=2000),
+):
+    cfg = load_config()
+    conn = connect(cfg["app"]["db_path"])
+    init_db(conn)
+
+    cutoff = int(time.time()) - days * 86400
+    has_updated_ts = _has_video_state_updated_ts(conn)
+    note = ""
+
+    base_rows = conn.execute(
+        """
+        SELECT
+          c.uid AS uid,
+          COALESCE(c.author_name, c.name) AS author_name,
+          c.enabled AS enabled,
+          COALESCE(c.priority,0) AS priority,
+          COALESCE(c.weight,1) AS weight,
+          p.pushed_count AS pushed_count,
+          p.last_pushed_ts AS last_pushed_ts,
+          vp.last_pub_ts AS last_pub_ts
+        FROM creators c
+        LEFT JOIN (
+            SELECT v.uid AS uid, COUNT(*) AS pushed_count, MAX(pl.pushed_ts) AS last_pushed_ts
+            FROM push_log pl
+            JOIN videos v ON v.bvid=pl.bvid
+            WHERE pl.channel=?
+              AND pl.pushed_ts>=?
+            GROUP BY v.uid
+        ) p ON p.uid = c.uid
+        LEFT JOIN (
+            SELECT v.uid AS uid, MAX(v.pub_ts) AS last_pub_ts
+            FROM videos v
+            LEFT JOIN video_state hs ON hs.bvid=v.bvid AND hs.state='HIDDEN'
+            WHERE hs.bvid IS NULL
+            GROUP BY v.uid
+        ) vp ON vp.uid = c.uid
+        ORDER BY COALESCE(c.priority,0) DESC,
+                 c.enabled DESC,
+                 COALESCE(p.pushed_count,0) DESC,
+                 COALESCE(vp.last_pub_ts,0) DESC,
+                 c.uid ASC
+        LIMIT ?
+        """,
+        (channel, cutoff, limit),
+    ).fetchall()
+
+    uid_rows = [int(r["uid"]) for r in base_rows]
+
+    sample_map = {}
+    mix_map = {}
+    hidden_map = {}
+    read_map = {}
+
+    if uid_rows:
+        uid_placeholders = ",".join(["?"] * len(uid_rows))
+
+        sample_rows = conn.execute(
+            f"""
+            SELECT x.uid, x.bvid
+            FROM (
+                SELECT v.uid AS uid, pl.bvid AS bvid, pl.pushed_ts AS pushed_ts,
+                       ROW_NUMBER() OVER (PARTITION BY v.uid ORDER BY pl.pushed_ts DESC, pl.bvid ASC) AS rn
+                FROM push_log pl
+                JOIN videos v ON v.bvid=pl.bvid
+                WHERE pl.channel=?
+                  AND pl.pushed_ts>=?
+                  AND v.uid IN ({uid_placeholders})
+            ) x
+            WHERE x.rn<=3
+            ORDER BY x.uid ASC, x.rn ASC
+            """,
+            (channel, cutoff, *uid_rows),
+        ).fetchall()
+        for r in sample_rows:
+            sample_map.setdefault(int(r["uid"]), []).append(r["bvid"])
+
+        mix_rows = conn.execute(
+            f"""
+            SELECT y.uid, y.tname, y.cnt
+            FROM (
+                SELECT v.uid AS uid,
+                       COALESCE(NULLIF(TRIM(v.tname),''), '未分区') AS tname,
+                       COUNT(*) AS cnt,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY v.uid
+                           ORDER BY COUNT(*) DESC, COALESCE(NULLIF(TRIM(v.tname),''), '未分区') ASC
+                       ) AS rn
+                FROM push_log pl
+                JOIN videos v ON v.bvid=pl.bvid
+                WHERE pl.channel=?
+                  AND pl.pushed_ts>=?
+                  AND v.uid IN ({uid_placeholders})
+                GROUP BY v.uid, COALESCE(NULLIF(TRIM(v.tname),''), '未分区')
+            ) y
+            WHERE y.rn<=3
+            ORDER BY y.uid ASC, y.cnt DESC, y.tname ASC
+            """,
+            (channel, cutoff, *uid_rows),
+        ).fetchall()
+        for r in mix_rows:
+            mix_map.setdefault(int(r["uid"]), []).append(CreatorTnameMix(tname=r["tname"], cnt=int(r["cnt"] or 0)))
+
+        if has_updated_ts:
+            state_rows = conn.execute(
+                f"""
+                SELECT v.uid AS uid,
+                       SUM(CASE WHEN s.state='HIDDEN' THEN 1 ELSE 0 END) AS hidden_cnt,
+                       SUM(CASE WHEN s.state='READ' THEN 1 ELSE 0 END) AS read_cnt
+                FROM video_state s
+                JOIN videos v ON v.bvid=s.bvid
+                WHERE s.updated_ts>=?
+                  AND v.uid IN ({uid_placeholders})
+                GROUP BY v.uid
+                """,
+                (cutoff, *uid_rows),
+            ).fetchall()
+        else:
+            note = "video_state 无时间字段，read/hidden 使用 all_time 统计"
+            state_rows = conn.execute(
+                f"""
+                SELECT v.uid AS uid,
+                       SUM(CASE WHEN s.state='HIDDEN' THEN 1 ELSE 0 END) AS hidden_cnt,
+                       SUM(CASE WHEN s.state='READ' THEN 1 ELSE 0 END) AS read_cnt
+                FROM video_state s
+                JOIN videos v ON v.bvid=s.bvid
+                WHERE v.uid IN ({uid_placeholders})
+                GROUP BY v.uid
+                """,
+                tuple(uid_rows),
+            ).fetchall()
+
+        for r in state_rows:
+            uid = int(r["uid"])
+            hidden_map[uid] = int(r["hidden_cnt"] or 0)
+            read_map[uid] = int(r["read_cnt"] or 0)
+
+    now_ts = int(time.time())
+    window_start = now_ts - days * 86400
+
+    out: List[CreatorStatsOut] = []
+    for r in base_rows:
+        uid = int(r["uid"])
+        pushed_count = int(r["pushed_count"] or 0)
+        last_pub_ts = r["last_pub_ts"]
+        freshness_hours = None
+        if last_pub_ts is not None:
+            freshness_hours = round((now_ts - int(last_pub_ts)) / 3600.0, 1)
+
+        has_new_video_in_window = last_pub_ts is not None and int(last_pub_ts) >= window_start
+        enabled = bool(r["enabled"])
+        priority = int(r["priority"] or 0)
+
+        if not enabled:
+            suppression_hint = "enabled=false"
+        elif pushed_count == 0 and has_new_video_in_window and priority > 0:
+            suppression_hint = f"priority>0 但近{days}天未推送(检查 cooldown/tname cap)"
+        elif pushed_count == 0 and has_new_video_in_window:
+            suppression_hint = f"近{days}天未推送但有新视频"
+        elif last_pub_ts is None:
+            suppression_hint = "暂无可见视频"
+        else:
+            suppression_hint = ""
+
+        hidden_window = hidden_map.get(uid, 0) if has_updated_ts else 0
+        read_window = read_map.get(uid, 0) if has_updated_ts else 0
+        hidden_all = hidden_map.get(uid, 0) if not has_updated_ts else 0
+        read_all = read_map.get(uid, 0) if not has_updated_ts else 0
+
+        out.append(
+            CreatorStatsOut(
+                uid=uid,
+                author_name=r["author_name"],
+                enabled=enabled,
+                priority=priority,
+                weight=max(1, int(r["weight"] or 1)),
+                last_pub_ts=last_pub_ts,
+                last_pushed_ts=r["last_pushed_ts"],
+                pushed_count=pushed_count,
+                pushed_bvids_sample=sample_map.get(uid, []),
+                pushed_tname_mix=mix_map.get(uid, []),
+                hidden_count_window=hidden_window,
+                read_count_window=read_window,
+                hidden_count_all_time=hidden_all,
+                read_count_all_time=read_all,
+                freshness_hours=freshness_hours,
+                suppression_hint=suppression_hint,
+                note=note,
             )
         )
 

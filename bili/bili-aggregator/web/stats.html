@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Bililite Stats</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="wrap creators-wrap">
+    <header class="page-head">
+      <p class="eyebrow">BILI LITE</p>
+      <h1>统计页 + 推送可解释性</h1>
+      <p class="sub"><a href="/" class="page-link">返回首页</a></p>
+    </header>
+
+    <div class="bar">
+      <button id="days7">近 7 天</button>
+      <button id="days30">近 30 天</button>
+      <input id="q" placeholder="搜索 author_name / uid" />
+      <label class="toggle">
+        <input id="onlySuppressed" type="checkbox" />
+        <span>仅看“未推送但有新视频”</span>
+      </label>
+      <button id="btnRefresh">刷新</button>
+    </div>
+
+    <div class="creators-panel" style="margin-bottom:12px;">
+      <div id="overviewCards"></div>
+      <p id="overviewNote" class="sub"></p>
+    </div>
+
+    <div class="creators-panel" style="overflow:auto;">
+      <table class="creators-table" id="statsTable">
+        <thead>
+          <tr>
+            <th>uid</th>
+            <th>author_name</th>
+            <th>enabled</th>
+            <th>priority</th>
+            <th>weight</th>
+            <th>pushed_count</th>
+            <th>last_pushed</th>
+            <th>last_pub</th>
+            <th>freshness(h)</th>
+            <th>suppression_hint</th>
+          </tr>
+        </thead>
+        <tbody id="statsBody"></tbody>
+      </table>
+    </div>
+
+    <p id="creatorNote" class="sub"></p>
+  </div>
+
+  <script src="/static/stats.js"></script>
+</body>
+</html>
