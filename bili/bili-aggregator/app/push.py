@@ -6,10 +6,10 @@ import urllib.request
 from typing import Any, Dict, Iterable, List, Optional
 
 from . import db
-from .config import load_config
 from .main import list_daily
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8000"
+UNKNOWN_TNAME = "(unknown)"
 
 
 def format_view(view: Optional[int]) -> str:
@@ -139,6 +139,139 @@ def write_push_log(conn, channel: str, videos: List[Dict[str, Any]]) -> int:
     return inserted
 
 
+def fetch_video_meta_map(conn, bvids: List[str]) -> Dict[str, Dict[str, Any]]:
+    if not bvids:
+        return {}
+    placeholders = ",".join(["?"] * len(bvids))
+    rows = conn.execute(
+        f"""
+        SELECT bvid, uid, tname, view, title, author_name, pub_ts, url
+        FROM videos
+        WHERE bvid IN ({placeholders})
+        """,
+        tuple(bvids),
+    ).fetchall()
+    out: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        out[r["bvid"]] = {
+            "uid": r["uid"],
+            "tname": r["tname"],
+            "view": r["view"],
+            "title": r["title"],
+            "author_name": r["author_name"],
+            "pub_ts": r["pub_ts"],
+            "url": r["url"],
+        }
+    return out
+
+
+def enrich_candidates_with_db(conn, videos: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    bvids = [v.get("bvid") for v in videos if v.get("bvid")]
+    meta_map = fetch_video_meta_map(conn, bvids)
+    out: List[Dict[str, Any]] = []
+    for v in videos:
+        bvid = v.get("bvid")
+        if not bvid:
+            continue
+        meta = meta_map.get(bvid, {})
+        merged = dict(v)
+        for key in ("uid", "tname", "view", "title", "author_name", "pub_ts", "url"):
+            if merged.get(key) is None and meta.get(key) is not None:
+                merged[key] = meta[key]
+        out.append(merged)
+    return out
+
+
+def load_recent_pushed_uid_set(conn, channel: str, cooldown_hours: int, now_ts: int) -> set[int]:
+    if cooldown_hours <= 0:
+        return set()
+    cutoff = now_ts - cooldown_hours * 3600
+    rows = conn.execute(
+        """
+        SELECT DISTINCT v.uid AS uid
+        FROM push_log pl
+        JOIN videos v ON v.bvid = pl.bvid
+        WHERE pl.channel = ?
+          AND pl.pushed_ts >= ?
+        """,
+        (channel, cutoff),
+    ).fetchall()
+    return {int(r["uid"]) for r in rows if r["uid"] is not None}
+
+
+def apply_throttle_filters(
+    conn,
+    channel: str,
+    videos: List[Dict[str, Any]],
+    throttle_cfg: Dict[str, Any],
+) -> tuple[List[Dict[str, Any]], Dict[str, int]]:
+    now_ts = int(time.time())
+    creator_cooldown_hours = max(0, int(throttle_cfg.get("creator_cooldown_hours", 0) or 0))
+    min_view = max(0, int(throttle_cfg.get("min_view", 0) or 0))
+    tname_max_per_push = max(0, int(throttle_cfg.get("tname_max_per_push", 0) or 0))
+
+    # (a) creator cooldown
+    drop_creator_cooldown = 0
+    cooldown_uids = load_recent_pushed_uid_set(conn, channel, creator_cooldown_hours, now_ts)
+    stage_a: List[Dict[str, Any]] = []
+    for v in videos:
+        uid = v.get("uid")
+        try:
+            uid_int = int(uid) if uid is not None else None
+        except Exception:
+            uid_int = None
+        if cooldown_uids and uid_int is not None and uid_int in cooldown_uids:
+            drop_creator_cooldown += 1
+            continue
+        stage_a.append(v)
+
+    # (b) min view
+    drop_min_view = 0
+    stage_b: List[Dict[str, Any]] = []
+    for v in stage_a:
+        if min_view <= 0:
+            stage_b.append(v)
+            continue
+        view = v.get("view")
+        # 缺失播放量时保守放行，避免误伤新稿
+        if view is None:
+            stage_b.append(v)
+            continue
+        try:
+            view_int = int(view)
+        except Exception:
+            stage_b.append(v)
+            continue
+        if view_int < min_view:
+            drop_min_view += 1
+            continue
+        stage_b.append(v)
+
+    # (c) tname cap（按出现顺序保留）
+    drop_tname_cap = 0
+    stage_c: List[Dict[str, Any]] = []
+    tname_counter: Dict[str, int] = {}
+    for v in stage_b:
+        if tname_max_per_push <= 0:
+            stage_c.append(v)
+            continue
+        tname = (v.get("tname") or "").strip() or UNKNOWN_TNAME
+        current = tname_counter.get(tname, 0)
+        if current >= tname_max_per_push:
+            drop_tname_cap += 1
+            continue
+        tname_counter[tname] = current + 1
+        stage_c.append(v)
+
+    return stage_c, {
+        "candidates": len(videos),
+        "drop_creator_cooldown": drop_creator_cooldown,
+        "drop_min_view": drop_min_view,
+        "drop_tname_cap": drop_tname_cap,
+        "final": len(stage_c),
+    }
+
+
 def build_markdown(videos: Iterable[Dict[str, Any]], home_url: str) -> str:
     lines = []
     for v in videos:
@@ -192,10 +325,30 @@ def build_daily_message(config: dict) -> Dict[str, Any]:
     conn = db.connect((config.get("app") or {}).get("db_path", "data/app.db"))
     db.init_db(conn)
     channel = push_cfg.get("provider", "serverchan")
+
+    before_dedup = len(videos)
     videos = filter_push_log(conn, channel, videos)
+    drop_push_log_dedup = before_dedup - len(videos)
+
+    # 由本地 DB 回查并补齐推送字段，避免依赖 /api/daily 返回字段完整度
+    videos = enrich_candidates_with_db(conn, videos)
+
+    throttle_cfg = (push_cfg.get("throttle") or {})
+    videos, stats = apply_throttle_filters(conn, channel, videos, throttle_cfg)
+
     max_items = int(((push_cfg.get("daily") or {}).get("max_items") or 0))
     videos = apply_max_items(videos, max_items)
     conn.close()
+
+    print(
+        "push_throttle_stats: "
+        f"candidates={stats['candidates']}, "
+        f"drop_push_log_dedup={drop_push_log_dedup}, "
+        f"drop_creator_cooldown={stats['drop_creator_cooldown']}, "
+        f"drop_min_view={stats['drop_min_view']}, "
+        f"drop_tname_cap={stats['drop_tname_cap']}, "
+        f"final={len(videos)}"
+    )
 
     if not videos:
         title = f"Bililite · 今日必看（0条）· {today}"
@@ -225,16 +378,16 @@ def send_daily_push(config: dict) -> int:
         print(f"Unsupported push provider: {provider}")
         return 1
 
-    sendkey = ((push_cfg.get("serverchan") or {}).get("sendkey") or "").strip()
-    if not sendkey:
-        print("push.serverchan.sendkey 未配置，请在 config.yaml 设置后重试")
-        return 1
-
     message = build_daily_message(config)
     videos = message.get("videos") or []
     if not videos:
         print("无新内容，跳过发送")
         return 0
+
+    sendkey = ((push_cfg.get("serverchan") or {}).get("sendkey") or "").strip()
+    if not sendkey:
+        print("push.serverchan.sendkey 未配置，请在 config.yaml 设置后重试")
+        return 1
 
     title = message["title"]
     content = message["content"]

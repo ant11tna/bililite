@@ -19,6 +19,10 @@ push:
     limit: 50
     sample: 5
     max_items: 5
+  throttle:
+    creator_cooldown_hours: 0  # 0=关闭；同一 creator 冷却窗口内最多推 1 条
+    tname_max_per_push: 0      # 0=关闭；单次推送同一 tname 最多保留 N 条
+    min_view: 0                # 0=关闭；仅过滤 view < min_view
 
 bilibili:
   timeout_sec: 15
