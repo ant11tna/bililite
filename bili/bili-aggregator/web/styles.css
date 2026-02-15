@@ -22,6 +22,44 @@ body {
   min-height: 100vh;
 }
 
+/* ===== Diffuse colorful blur header background ===== */
+body.has-diffuse { position: relative; }
+
+body.has-diffuse::before{
+  content:"";
+  position: fixed;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 360px;            /* 关键：限制顶部高度，别做全屏 */
+  pointer-events: none;
+  z-index: 0;
+
+  background:
+    radial-gradient(360px 260px at 12% 20%, rgba(46,199,212,.42), transparent 68%),
+    radial-gradient(380px 280px at 52% 8%,  rgba(61,139,245,.26), transparent 70%),
+    radial-gradient(420px 320px at 86% 18%, rgba(178,218,97,.30), transparent 72%),
+    radial-gradient(520px 360px at 60% 62%, rgba(224,90,146,.14), transparent 76%);
+  filter: blur(26px) saturate(150%);
+  opacity: .95;
+  transform: translateZ(0);
+}
+
+body.has-diffuse::after{
+  content:"";
+  position: fixed;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 360px;
+  pointer-events: none;
+  z-index: 0;
+  background: rgba(255,255,255,.06);
+}
+
+/* 确保页面内容在背景层之上 */
+body.has-diffuse .wrap { position: relative; z-index: 1; }
+
 .wrap {
   max-width: 1150px;
   margin: 24px auto;
